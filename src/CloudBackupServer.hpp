@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <algorithm>
 #include <unordered_map>
 #include <boost/filesystem.hpp>
 #include "httplib.h"
@@ -89,14 +90,13 @@ namespace CloudBackup {
             : m_fileStatus(sta), m_fileATime(atime), m_fileSize(size) {}
       };
     public:
-      FileDataManager(const std::string &name = "/root/workspace/CloudBackup/src/srv_log.dat") : m_filename(name) {
+      FileDataManager() {
+        m_filename = MyUtil::getConfig("./CBackup.cnf", "CloudServer")["srcLog"];
         // 初始化读写锁
-        pthread_rwlock_init(&m_rwlock, NULL);
         _loadData();
       }
       ~FileDataManager() {
         // 销毁读写锁
-        pthread_rwlock_destroy(&m_rwlock);
         _storageData();
       }
       bool isCompressedFile(const std::string &filepath) {
@@ -110,14 +110,14 @@ namespace CloudBackup {
       }
       bool insertData(const std::string &filepath) {
         FileData data;
-        pthread_rwlock_wrlock(&m_rwlock);
+        m_mutex.lock();
         if (!getFileData(filepath, data)) {
-          pthread_rwlock_unlock(&m_rwlock);
+          m_mutex.unlock();
           std::cout << filepath << " insert error" << std::endl;
           return false;
         }
         m_map[filepath] = data;
-        pthread_rwlock_unlock(&m_rwlock);
+        m_mutex.unlock();
         _storageData();
         return true;
       }
@@ -125,9 +125,9 @@ namespace CloudBackup {
         if (!isExistFile(filepath)) {
           return false;
         }
-        pthread_rwlock_wrlock(&m_rwlock);
+        m_mutex.lock();
         m_map.erase(m_map.find(filepath));
-        pthread_rwlock_unlock(&m_rwlock);
+        m_mutex.unlock();
         _storageData();
         return true;
       }
@@ -136,24 +136,24 @@ namespace CloudBackup {
           return false;
         }
         if (isCompressedFile(filepath)) {
-          pthread_rwlock_wrlock(&m_rwlock);
+          m_mutex.lock();
           m_map[filepath].m_fileStatus = NORMAL;
-          pthread_rwlock_unlock(&m_rwlock);
+          m_mutex.unlock();
         } else {
-          pthread_rwlock_wrlock(&m_rwlock);
+          m_mutex.lock();
           m_map[filepath].m_fileStatus = COMPRESSED;
-          pthread_rwlock_unlock(&m_rwlock);
+          m_mutex.unlock();
         }
         _storageData();
         return true;
       }
       bool getAllList(std::vector<std::string> &fileList) {
         fileList.clear();
-        pthread_rwlock_rdlock(&m_rwlock);
+        m_mutex.lock();
         for (auto &it : m_map) {
           fileList.push_back(it.first);
         }
-        pthread_rwlock_unlock(&m_rwlock);
+        m_mutex.unlock();
         return true;
       }
       bool getDirList(const std::string &dirpath, std::vector<std::string> &fileList) {
@@ -162,20 +162,30 @@ namespace CloudBackup {
           return false;
         }
         std::string filepath;
-        boost::filesystem::directory_iterator iter_begin(dirpath), iter_end;
-        pthread_rwlock_rdlock(&m_rwlock);
-        for (; iter_begin != iter_end; ++iter_begin) {
-          filepath = iter_begin->path().string();
-          if (filepath.rfind(".gz") == filepath.size() - 3) {
-            filepath.erase(filepath.end() - 3, filepath.end());
-          }
+        std::vector<std::string> tmpList;
+        boost::filesystem::directory_iterator iter_dir(dirpath), iter_file(dirpath), iter_end;
+        m_mutex.lock();
+        for (; iter_dir != iter_end; ++iter_dir) {
+          filepath = iter_dir->path().string();
           if (boost::filesystem::is_directory(filepath)) {
-            fileList.push_back(filepath);
-          } else if (m_map.find(filepath) != m_map.end()) {
             fileList.push_back(filepath);
           }
         }
-        pthread_rwlock_unlock(&m_rwlock);
+        sort(fileList.begin(), fileList.end());
+        for (; iter_file != iter_end; ++iter_file) {
+          filepath = iter_file->path().string();
+          if (m_map.find(filepath) != m_map.end()) {
+            tmpList.push_back(filepath);
+          } else if (filepath.rfind(".gz") == filepath.size() - 3) {
+            filepath.erase(filepath.end() - 3, filepath.end());
+            if (m_map.find(filepath) != m_map.end()) {
+              tmpList.push_back(filepath);
+            }
+          }
+        }
+        sort(tmpList.begin(), tmpList.end());
+        fileList.insert(fileList.end(), tmpList.begin(), tmpList.end());
+        m_mutex.unlock();
         return true;
       }
       bool getFileData(const std::string &filepath, FileData &res) {
@@ -216,12 +226,12 @@ namespace CloudBackup {
         int flag;
         std::string filepath;
         FileData tmpdata;
-        pthread_rwlock_wrlock(&m_rwlock);
+        m_mutex.lock();
         while (fin >> filepath >> flag >> tmpdata.m_fileATime >> tmpdata.m_fileSize) {
           tmpdata.m_fileStatus = (flag == 0) ? NORMAL : COMPRESSED;
           m_map[filepath] = tmpdata;
         }
-        pthread_rwlock_unlock(&m_rwlock);
+        m_mutex.unlock();
       }
       void _storageData() {
         std::ofstream fout;
@@ -230,17 +240,17 @@ namespace CloudBackup {
           std::cout << "open file " << m_filename << " error!" << std::endl;
           abort();
         }
-        pthread_rwlock_rdlock(&m_rwlock);
+        m_mutex.lock();
         for (auto &it : m_map) {
           fout << it.first << ' ' << ((it.second.m_fileStatus == NORMAL) ? 0 : 1) 
             << ' ' << it.second.m_fileATime << ' ' << it.second.m_fileSize << std::endl;
         }
-        pthread_rwlock_unlock(&m_rwlock);
+        m_mutex.unlock();
       }
     private:
       std::string m_filename;
       std::unordered_map<std::string, FileData> m_map;
-      pthread_rwlock_t m_rwlock;
+      std::mutex m_mutex;
   };
   
   FileDataManager fdManager;
@@ -273,15 +283,34 @@ namespace CloudBackup {
   class HttpServerModule
   {
     public:
-      void start() {
-        m_srv.Get("/", _fileList);
+      void start(const std::string &host = "0.0.0.0", int port = 9000) {
+        int ret = m_srv.set_mount_point("/", "./www");
+        if (!ret) {
+          boost::filesystem::create_directories("./www");
+          m_srv.set_mount_point("/", "./www");
+        }
+        m_srv.Post("/register", _register);
+        m_srv.Post("/login", _login);
         m_srv.Get("/list", _fileList);
         m_srv.Get("/list/(.*)", _fileList);
         m_srv.Get("/download/(.*)", _fileDownload);
-		m_srv.Put("/upload/(.*)", _fileUpload);
-        m_srv.listen("0.0.0.0", 9000);
+		    m_srv.Put("/upload/(.*)", _fileUpload);
+        m_srv.listen(host.c_str(), port);
       }
     private:
+      static void _register(const httplib::Request &req, httplib::Response &res) {
+        std::cout << "register:> " << "name[" << req.get_param_value("username") 
+          << "] password1[" << req.get_param_value("password") 
+          << "] password2[" << req.get_param_value("password2") << std::endl;
+        res.status = 200;
+        res.body = "----";
+      }
+      static void _login(const httplib::Request &req, httplib::Response &res) {
+        std::cout << "login:> " << "name[" << req.get_param_value("username") 
+          << "] password[" << req.get_param_value("password") << std::endl;
+        res.status = 200;
+        res.body = "----";
+      }
       static void _fileUpload(const httplib::Request &req, httplib::Response &res) {
         std::cout << "upload:> " << req.matches[0].str() << std::endl;
         std::string filepath = "/data/CloudBackup/" + req.matches[1].str();
@@ -326,9 +355,12 @@ namespace CloudBackup {
         }
         fdManager.getDirList(dirpath, fileList);
         buf << "<html>\r\n"
-          << "<head><title>Index of "<< dirpath.substr(17) << "</title></head>\r\n"
-          << "<body>\r\n"
-          << "<h1>Index of " << dirpath.substr(17)  << "</h1><hr><pre>\r\n"
+          << "\t<head><title>Index of "<< dirpath.substr(17) << "</title></head>\r\n\r\n"
+          << "\t<body>\r\n"
+          << "\t\t<a href=\"/index.html\">登录</a>\t<a href=\"/register.html\">注册</a>" 
+          << "\t<a href=\"http://connect.qq.com/toc/auth_manager?from=auth\">QQ授权管理</a>"
+          << "\t<a href=\"/list\">公共文件</a>\r\n"
+          << "\t\t<h1>Index of " << dirpath.substr(17)  << "</h1><hr><pre>\r\n"
           << "<a href='/list" << parentDirpath.substr(17) << "'>../</a>\r\n";
         for (std::vector<std::string>::size_type i = 0; i < fileList.size(); ++i) {
           pathtmp = fileList[i].substr(18);
@@ -336,13 +368,15 @@ namespace CloudBackup {
           if (boost::filesystem::is_directory(fileList[i])) {
             buf << "<a href='/list/" << pathtmp << "'>" << filename << "/</a><br>";
           } else {
+            std::string filesize = fdManager.getFileSize(fileList[i]);
             buf << "<a href='/download/" << pathtmp << "'>" << filename << "</a>"
               << std::string((filename.size() < 70) ? 70 - filename.size() : 0, ' ') 
-              << "\t\t\t大小: " << fdManager.getFileSize(fileList[i]) 
-              << "\t最新访问时间: " << fdManager.getAtime(fileList[i]);
+              << "\t\t\t大小: " << filesize 
+              << std::string((filesize.size() < 10) ? 10 - filesize.size() : 0, ' ') 
+              << "\t最近访问: " << fdManager.getAtime(fileList[i]);
           }
         }
-        buf << "</pre><hr></body>\r\n"
+        buf << "</pre>\r\n\t\t</hr>\r\n\t</body>\r\n"
           << "</html>";
         res.body = buf.str();
         res.status = 200;

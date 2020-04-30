@@ -15,7 +15,8 @@ namespace CloudBackup {
 	class LocalFileManager
 	{
 	public:
-		LocalFileManager(const std::string &name = "cli_log.dat") : m_filename(name) {
+		LocalFileManager() {
+      m_filename = MyUtil::getConfig("./CBackup.cnf", "CloudClient")["cliLog"];
 			_loadData();
 		}
 		~LocalFileManager() {
@@ -107,20 +108,20 @@ namespace CloudBackup {
 	class HttpClientModule
 	{
 	public:
-		HttpClientModule(std::vector<std::string> listenDirs, const std::string &host, int port = 80)
+		HttpClientModule(std::vector<std::string> listenDirs, const std::string &host, int port = 9000)
 			: m_cli(host, port) {
 			if (listenDirs.empty()) {
-				m_listenDirs.push_back("C:/Program Files/CloudBackup");
+				m_listenDirs.push_back("./");
 			}
-			for (auto &path : listenDirs) {
-				MyUtil::DealPath(path);
-				if (!boost::filesystem::exists(path)) {
-					boost::filesystem::create_directories(path);
+			for (auto &dirpath : listenDirs) {
+				MyUtil::DealPath(dirpath);
+				if (!boost::filesystem::exists(dirpath)) {
+					boost::filesystem::create_directories(dirpath);
 				}
-				m_listenDirs.push_back(path);
+				m_listenDirs.push_back(dirpath);
 			}
 		}
-		HttpClientModule(const std::string &listenDir, const std::string &host, int port = 80)
+		HttpClientModule(const std::string &listenDir, const std::string &host, int port = 9000)
 			: HttpClientModule(std::vector<std::string>(1, listenDir), host, port) {}
 		void start() {
 			std::string path, body;

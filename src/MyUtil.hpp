@@ -51,6 +51,32 @@ namespace CloudBackup {
 			fout.close();
 			return true;
 		}
+    static std::map<std::string, std::string> getConfig(const std::string &cnfFile, const std::string &item)
+    {
+      std::ifstream fin(cnfFile.c_str());
+      if (!fin.is_open()) {
+        std::cout << "open file " + cnfFile + " failed!" << std::endl;
+        throw std::runtime_error("open file " + cnfFile + " failed!");
+      }
+
+      std::string tmp;
+      std::map<std::string, std::string> config;
+      while (getline(fin, tmp)) {
+        if (tmp.size() > 2 && tmp.substr(1, tmp.size() - 2) == item) {
+          break;
+        }
+      }
+      while (getline(fin, tmp)) {
+        if (tmp[0] == '#' || tmp.find("=") == std::string::npos) {
+          continue;
+        } else if (tmp[0] == '[') {
+          break;
+        }
+        auto pos = tmp.find("=");
+        config[tmp.substr(0, pos)] = tmp.substr(pos + 1, tmp.find("#") - pos - 1);
+      }
+      return config;
+    }
 		// ´¦ÀíÂ·¾¶
 		static std::string& DealPath(std::string &path) {
 			while (path.find("\\") != std::string::npos) {

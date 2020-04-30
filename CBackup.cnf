@@ -1,0 +1,13 @@
+[CloudClient]
+cliLog=./cli_log.dat
+cliDirPath=./cli_dirpath.dat
+srvIP=39.102.34.164
+srvPort=9000
+
+[CloudServer]
+srcLog=./srv_log.dat
+host=0.0.0.0
+port=9000
+
+
+
